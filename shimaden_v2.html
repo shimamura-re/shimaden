@@ -657,6 +657,7 @@ const GAS_API_URL = localStorage.getItem('shimaden_gas_url') || 'https://script.
 let cases = JSON.parse(localStorage.getItem('shimaden_v2')||'[]');
 let itemRows=[], discRows=[], parsedI=[], parsedD=[];
 let lastLineMsg='', editingId=null, statusTargetId=null;
+let priceItems = []; // 料金表データ
 let dashFilter='all', activeTele='all', selMember='all';
 let dashYear=new Date().getFullYear(), dashMonth=new Date().getMonth();
 let currentDetailId=null, currentDTab='info';
@@ -696,6 +697,16 @@ async function fetchCustomers(forceRefresh=false){
   } finally {
     customerLoading=false;
   }
+}
+
+// 料金表をGASから取得
+async function fetchPriceList(){
+  if(!GAS_API_URL) return;
+  try {
+    const res = await fetch(GAS_API_URL + '?action=price_list&t=' + Date.now());
+    const json = await res.json();
+    if(json.items){ priceItems = json.items; }
+  } catch(e) { console.warn('料金表の取得に失敗:', e); }
 }
 
 // 顧客台帳にメモを保存
@@ -1388,6 +1399,15 @@ function rmItem(id){ itemRows=itemRows.filter(r=>r.id!=id); renderItems(); }
 function rmDisc(id){ discRows=discRows.filter(r=>r.id!=id); renderDiscs(); }
 function updItem(id,k,v){ const r=itemRows.find(r=>r.id==id); if(r) r[k]=k==='name'?v:(parseFloat(v)||0); }
 function updDisc(id,k,v){ const r=discRows.find(r=>r.id==id); if(r) r[k]=k==='name'?v:(parseFloat(v)||0); }
+function autoFillPrice(id, val, container){
+  const match = priceItems.find(p => p.name === val);
+  if(!match) return;
+  const r = itemRows.find(r=>r.id==id);
+  if(r){ r.name=val; r.price=match.priceIn; }
+  // 単価inputを更新
+  const inputs = container.querySelectorAll('input[type=number]');
+  if(inputs[1]) inputs[1].value = match.priceIn;
+}
 
 function renderItems(){
   const a=document.getElementById('own-items'); a.innerHTML='';
@@ -1398,7 +1418,9 @@ function renderItems(){
       d.innerHTML=`<input class="sec-inp" type="text" value="${row.name}" placeholder="セクション名" onchange="updItem('${row.id}','name',this.value)"><button class="del-btn" onclick="rmItem('${row.id}')">×</button>`;
     } else {
       d.className='item-row';
-      d.innerHTML=`<input type="text" value="${row.name}" placeholder="摘要" onchange="updItem('${row.id}','name',this.value)"><input type="number" value="${row.qty}" min="0" step="0.5" style="text-align:right" onchange="updItem('${row.id}','qty',this.value)"><input type="number" value="${row.price}" min="0" step="100" style="text-align:right" onchange="updItem('${row.id}','price',this.value)"><button class="del-btn" onclick="rmItem('${row.id}')">×</button>`;
+      const dlId = 'dl_' + row.id.toString().replace('.','_');
+      const dlHtml = priceItems.length ? `<datalist id="${dlId}">${priceItems.map(p=>`<option value="${p.name}" data-price="${p.priceIn}">`).join('')}</datalist>` : '';
+      d.innerHTML=`${dlHtml}<input type="text" value="${row.name}" placeholder="摘要" list="${dlId}" onchange="updItem('${row.id}','name',this.value)" oninput="autoFillPrice('${row.id}',this.value,this.parentNode)"><input type="number" value="${row.qty}" min="0" step="0.5" style="text-align:right" onchange="updItem('${row.id}','qty',this.value)"><input type="number" value="${row.price}" min="0" step="100" style="text-align:right" onchange="updItem('${row.id}','price',this.value)"><button class="del-btn" onclick="rmItem('${row.id}')">×</button>`;
     }
     a.appendChild(d);
   });
@@ -1547,6 +1569,7 @@ if(GAS_API_URL){
   if(needRefresh || !customerRecords.length){
     fetchCustomers();
   }
+  fetchPriceList();
 }
 </script>
 </body>
