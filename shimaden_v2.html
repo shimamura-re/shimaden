@@ -649,6 +649,11 @@ const MEMBERS = [
 ];
 const COMM_RATE = 0.3;
 
+// ─────────────────────────────────────────────────────────────
+// GAS API 設定（デプロイ後にURLを差し替えてください）
+// ─────────────────────────────────────────────────────────────
+const GAS_API_URL = localStorage.getItem('shimaden_gas_url') || 'https://script.google.com/macros/s/AKfycbwtozajx_PriHnzuhdKh7aEja91TjZvk75uMnLg1DJpJwGUIYX_odgi9oqukuODWlzb/exec';
+
 let cases = JSON.parse(localStorage.getItem('shimaden_v2')||'[]');
 let itemRows=[], discRows=[], parsedI=[], parsedD=[];
 let lastLineMsg='', editingId=null, statusTargetId=null;
@@ -657,8 +662,49 @@ let dashYear=new Date().getFullYear(), dashMonth=new Date().getMonth();
 let currentDetailId=null, currentDTab='info';
 let currentTemplate='jp';
 
+// 顧客台帳データ（GASスプレッドシートから取得）
+let customerRecords = JSON.parse(localStorage.getItem('shimaden_customers')||'[]');
+let customerLoading = false;
+
 if(!cases.length) cases = generateSample();
 function save(){ localStorage.setItem('shimaden_v2',JSON.stringify(cases)); }
+
+// GAS URLを設定する関数
+function setGasUrl(){
+  const url = prompt('GAS WebアプリのURLを入力してください：', GAS_API_URL||'https://script.google.com/macros/s/...');
+  if(url && url.startsWith('https://')) {
+    localStorage.setItem('shimaden_gas_url', url);
+    location.reload();
+  }
+}
+
+// 顧客台帳をGASから取得
+async function fetchCustomers(forceRefresh=false){
+  if(!GAS_API_URL){ return; }
+  if(customerLoading) return;
+  customerLoading=true;
+  try {
+    const res = await fetch(GAS_API_URL + '?action=customers&t=' + Date.now());
+    const json = await res.json();
+    if(json.customers){
+      customerRecords = json.customers;
+      localStorage.setItem('shimaden_customers', JSON.stringify(customerRecords));
+      localStorage.setItem('shimaden_customers_at', new Date().toISOString());
+    }
+  } catch(e) {
+    console.warn('顧客台帳の取得に失敗:', e);
+  } finally {
+    customerLoading=false;
+  }
+}
+
+// 顧客台帳にメモを保存
+async function saveCustomerMemo(no, memo, date){
+  if(!GAS_API_URL) return;
+  try {
+    await fetch(`${GAS_API_URL}?action=update_memo&no=${encodeURIComponent(no)}&memo=${encodeURIComponent(memo)}&date=${encodeURIComponent(date)}`);
+  } catch(e) { console.warn('メモ保存失敗:', e); }
+}
 function fmt(n){ return Number(n||0).toLocaleString('ja-JP'); }
 function today(){ return new Date().toISOString().split('T')[0]; }
 function addDays(n){ const d=new Date(); d.setDate(d.getDate()+n); return d.toISOString().split('T')[0]; }
@@ -869,34 +915,77 @@ function getFollowDate(c){
 function renderTele(){
   const t=today();
   const week=addDays(7);
-  const list=cases.filter(c=>c.status==='done'||c.status==='inv');
-  const overdue=list.filter(c=>{const fd=getFollowDate(c);return fd&&fd<t;}).length;
-  const upcoming=list.filter(c=>{const fd=getFollowDate(c);return fd&&fd>=t&&fd<=week;}).length;
+
+  // GAS連携がある場合はcustomerRecords、なければcasesから生成
+  let list;
+  if(GAS_API_URL && customerRecords.length){
+    list = customerRecords.map(c=>({
+      _type: 'customer',
+      no: c['No'],
+      customer: c['お客様名'],
+      kana: c['フリガナ'],
+      addr: c['住所'],
+      tel: c['電話(携帯)'] || c['電話(自宅)'],
+      subject: c['商品名'] || c['型番'],
+      date: c['工事日'],
+      followDate: c['フォロー予定'],
+      lastMemo: c['対応メモ'],
+      lastDate: c['最終対応日'],
+      member: c['担当者'],
+      source: c['元請け'],
+      model: c['型番'],
+      workMemo: c['工事内容メモ'],
+    }));
+  } else {
+    list = cases.filter(c=>c.status==='done'||c.status==='inv').map(c=>({
+      _type: 'local',
+      id: c.id,
+      customer: c.customer,
+      addr: c.addr,
+      tel: c.tel,
+      subject: c.subject,
+      date: c.date,
+      followDate: getFollowDate(c),
+      lastMemo: c.lastFollow ? c.lastFollow.memo : '',
+      lastDate: c.lastFollow ? c.lastFollow.date : '',
+      memberId: c.memberId,
+    }));
+  }
+
+  const overdue=list.filter(c=>{const fd=c.followDate;return fd&&fd<t;}).length;
+  const upcoming=list.filter(c=>{const fd=c.followDate;return fd&&fd>=t&&fd<=week;}).length;
   const kpi=document.getElementById('tele-kpi');
+  const gasStatus = GAS_API_URL
+    ? `<div class="kpi-card" onclick="fetchCustomers(true).then(()=>renderTele())" style="cursor:pointer;"><div class="kpi-num" style="font-size:20px;">🔄</div><div class="kpi-lbl">更新</div></div>`
+    : `<div class="kpi-card" onclick="setGasUrl()" style="cursor:pointer;"><div class="kpi-num" style="font-size:20px;">⚙️</div><div class="kpi-lbl">API設定</div></div>`;
   kpi.innerHTML=`
     <div class="kpi-card"><div class="kpi-num" style="color:var(--red);">${overdue}</div><div class="kpi-lbl">期限切れ</div></div>
     <div class="kpi-card"><div class="kpi-num" style="color:var(--gold);">${upcoming}</div><div class="kpi-lbl">7日以内</div></div>
-    <div class="kpi-card"><div class="kpi-num">${list.length}</div><div class="kpi-lbl">対象</div></div>`;
+    <div class="kpi-card"><div class="kpi-num">${list.length}</div><div class="kpi-lbl">対象</div></div>
+    ${gasStatus}`;
   const dot=document.getElementById('dot-tele');
   if(dot) dot.classList.toggle('show',overdue>0);
   const frow=document.getElementById('tele-filter-row');
   const filters=[{k:'all',l:'すべて'},{k:'overdue',l:'🔴 期限切れ'},{k:'upcoming',l:'🟡 7日以内'},{k:'pending',l:'未対応'},{k:'done',l:'対応済'}];
   frow.innerHTML=filters.map(f=>`<button class="chip${activeTele===f.k?' active':''}" onclick="setTeleFilter('${f.k}')">${f.l}</button>`).join('');
   let filtered=list;
-  if(activeTele==='overdue') filtered=list.filter(c=>{const fd=getFollowDate(c);return fd&&fd<t;});
-  else if(activeTele==='upcoming') filtered=list.filter(c=>{const fd=getFollowDate(c);return fd&&fd>=t&&fd<=week;});
-  else if(activeTele==='pending') filtered=list.filter(c=>!c.lastFollow||c.lastFollow.status!=='done');
-  else if(activeTele==='done') filtered=list.filter(c=>c.lastFollow&&c.lastFollow.status==='done');
-  filtered.sort((a,b)=>{const fa=getFollowDate(a)||'9999',fb=getFollowDate(b)||'9999';return fa.localeCompare(fb);});
+  if(activeTele==='overdue') filtered=list.filter(c=>{const fd=c.followDate;return fd&&fd<t;});
+  else if(activeTele==='upcoming') filtered=list.filter(c=>{const fd=c.followDate;return fd&&fd>=t&&fd<=week;});
+  else if(activeTele==='pending') filtered=list.filter(c=>!c.lastMemo);
+  else if(activeTele==='done') filtered=list.filter(c=>c.lastMemo==='対応済');
+  filtered.sort((a,b)=>{const fa=a.followDate||'9999',fb=b.followDate||'9999';return fa.localeCompare(fb);});
   const area=document.getElementById('tele-list');
-  if(!filtered.length){area.innerHTML='<div class="empty"><p>対象なし</p></div>';return;}
+  if(!filtered.length){
+    area.innerHTML=`<div class="empty"><p>対象なし</p>${!GAS_API_URL?'<p style="font-size:12px;color:var(--muted)">GAS APIを設定すると顧客台帳と同期できます</p>':''}</div>`;
+    return;
+  }
   area.innerHTML=filtered.map(c=>{
-    const fd=getFollowDate(c);
+    const fd=c.followDate;
     const isOver=fd&&fd<t;
     const isUp=fd&&fd>=t&&fd<=week;
     const cls=isOver?'overdue':isUp?'upcoming':'normal';
-    const mm=MEMBERS.find(m=>m.id===c.memberId);
-    const lastFollow=c.lastFollow;
+    const noteId=c._type==='customer'?`"c_${c.no}"`:`${c.id}`;
+    const telNum = c.tel ? c.tel.replace(/-/g,'') : '';
     return `<div class="tele-card ${cls}">
       <div class="tele-name">${c.customer} 様</div>
       <div class="tele-meta">
@@ -904,13 +993,14 @@ function renderTele(){
         📞 ${c.tel||'電話番号未入力'}<br>
         🔧 ${c.subject||'工事内容不明'} / ${c.date||'-'}<br>
         📅 フォロー予定：<strong style="color:${isOver?'var(--red)':isUp?'var(--gold)':'var(--green)'};">${fd||'-'}</strong>
-        ${mm?`<br>👤 ${mm.name}`:''}
-        ${lastFollow?`<br>💬 最終: ${lastFollow.memo||''}`:''}
+        ${c.member?`<br>👤 ${c.member}`:''}
+        ${c.workMemo?`<br>📋 ${c.workMemo}`:''}
+        ${c.lastMemo?`<br>💬 最終(${c.lastDate||''}): ${c.lastMemo}`:''}
       </div>
       <div class="tele-actions">
-        ${c.tel?`<a href="tel:${c.tel.replace(/-/g,'')}" class="tele-btn tele-call" style="text-decoration:none;display:flex;align-items:center;justify-content:center;">📞 電話</a>`:'<div class="tele-btn tele-done">電話なし</div>'}
-        <button class="tele-btn tele-note" onclick="addTeleNote(${c.id})">📝 記録</button>
-        <button class="tele-btn tele-done" onclick="markTeleDone(${c.id})">✅ 対応済</button>
+        ${telNum?`<a href="tel:${telNum}" class="tele-btn tele-call" style="text-decoration:none;display:flex;align-items:center;justify-content:center;">📞 電話</a>`:'<div class="tele-btn" style="opacity:.4">電話なし</div>'}
+        <button class="tele-btn tele-note" onclick="addTeleNote(${noteId})">📝 記録</button>
+        <button class="tele-btn tele-done" onclick="markTeleDone(${noteId})">✅ 対応済</button>
       </div>
     </div>`;
   }).join('');
@@ -921,6 +1011,20 @@ function setTeleFilter(f){ activeTele=f; renderTele(); }
 function addTeleNote(id){
   const memo=prompt('フォローメモを入力してください：');
   if(!memo) return;
+  // 顧客台帳レコード（idが"c_No"形式）
+  if(typeof id==='string' && id.startsWith('c_')){
+    const no=id.slice(2);
+    const rec=customerRecords.find(r=>String(r['No'])===no);
+    if(rec){
+      rec['対応メモ']=memo;
+      rec['最終対応日']=today();
+      localStorage.setItem('shimaden_customers',JSON.stringify(customerRecords));
+      saveCustomerMemo(no, memo, today());
+    }
+    renderTele(); toast('📝 メモを保存しました');
+    return;
+  }
+  // ローカルcases
   const c=cases.find(x=>x.id===id);
   if(!c) return;
   if(!c.follows) c.follows=[];
@@ -930,6 +1034,20 @@ function addTeleNote(id){
 }
 
 function markTeleDone(id){
+  // 顧客台帳レコード
+  if(typeof id==='string' && id.startsWith('c_')){
+    const no=id.slice(2);
+    const rec=customerRecords.find(r=>String(r['No'])===no);
+    if(rec){
+      rec['対応メモ']='対応済';
+      rec['最終対応日']=today();
+      localStorage.setItem('shimaden_customers',JSON.stringify(customerRecords));
+      saveCustomerMemo(no, '対応済', today());
+    }
+    renderTele(); toast('✅ 対応済にしました');
+    return;
+  }
+  // ローカルcases
   const c=cases.find(x=>x.id===id);
   if(!c) return;
   if(!c.follows) c.follows=[];
@@ -1421,6 +1539,15 @@ document.getElementById('jp-date').value=today();
 document.getElementById('nj-date').value=today();
 updateRemarks();
 renderDash();
+
+// 顧客台帳をGASから取得（キャッシュが1時間以上古い場合のみ）
+if(GAS_API_URL){
+  const lastFetch = localStorage.getItem('shimaden_customers_at');
+  const needRefresh = !lastFetch || (Date.now() - new Date(lastFetch).getTime() > 3600000);
+  if(needRefresh || !customerRecords.length){
+    fetchCustomers();
+  }
+}
 </script>
 </body>
 </html>
